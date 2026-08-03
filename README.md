@@ -22,6 +22,7 @@ These commitments exist because the mentor is the sole author of AgentTelemetry,
 
 - `CHARTER.md`: roles, cadence, gates, authorship policy, escalation rules.
 - `codebook/CODEBOOK_v0.md`: draft annotation codebook. Not for annotation use until v1.
+- `samples/`: two synthetic sample traces and instructions for the applicant screening exercise. Not part of the study corpus.
 - `scripts/collect_traces.py`: trace-collection stub implementing the written inclusion rules.
 
 ## References
