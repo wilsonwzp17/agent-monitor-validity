@@ -264,6 +264,18 @@ class TestHoldsEnd(unittest.TestCase):
         for item in (REASONING_ITEM, empty_message, dict(message_item(), status="in_progress", content=[]),
                      "message", None, ["message"], 5):
             self.assertFalse(holds_end("openai", sse(delivered_then_failed(item))), item)
+        # The event counts whatever the failed response itself lists: here the same item, still in progress.
+        listed = partly_answered()
+        for status in ("completed", "incomplete"):
+            done = ("response.output_item.done", {"type": "response.output_item.done", "output_index": 1,
+                                                  "item": dict(message_item(), status=status)})
+            self.assertTrue(holds_end("openai", sse(listed[:-1] + [done] + listed[-1:])), status)
+        # An event that opens an item or a part closes nothing.
+        for kind, fields in (("response.output_item.added", {"item": message_item()}),
+                             ("response.content_part.added", {"part": TEXT_PART})):
+            for events in (bare_failed(), partly_answered()):
+                opened = events[:-1] + [(kind, dict({"type": kind, "output_index": 1}, **fields))] + events[-1:]
+                self.assertFalse(holds_end("openai", sse(opened)), kind)
 
     def test_a_done_event_for_the_answer_text_counts_beside_a_failed_response_whatever_the_item_says(self):
         self.assertFalse(holds_end("openai", sse(partly_answered())))                  # no event says it is done
@@ -279,6 +291,23 @@ class TestHoldsEnd(unittest.TestCase):
         for kind in ("response.output_text.delta", "response.reasoning_summary_text.done",
                      "response.output_item.added", "output_text.done"):
             self.assertFalse(holds_end("openai", sse(marked_done(kind, text=TEXT))), kind)
+        # The event alone stands for the answer: the failed response may list no item at all.
+        bare = bare_failed()
+        for kind, fields in DONE_EVENTS:
+            alone = bare[:-1] + [(kind, dict({"type": kind, "item_id": "msg_1"}, **fields))] + bare[-1:]
+            self.assertTrue(holds_end("openai", sse(alone)), kind)
+        # It counts by its type. Its text is not looked at, so an empty one counts too.
+        self.assertTrue(holds_end("openai", sse(marked_done("response.output_text.done", text=""))))
+        self.assertTrue(holds_end("openai", sse(marked_done("response.output_text.done"))))
+        self.assertTrue(holds_end("openai", sse(marked_done("response.content_part.done",
+                                                            part={"type": "output_text", "text": ""}))))
+        # A type that is no string is no done event, and the reader does not raise on it.
+        for part in ({"type": ["output_text"]}, {"type": {"output_text": 1}}, {"type": 5}, {"type": None}):
+            self.assertFalse(holds_end("openai", sse(marked_done("response.content_part.done", part=part))), part)
+        for odd in (["response.output_text.done"], {"response.output_text.done": 1}, 5, None, True):
+            events = partly_answered()
+            events = events[:-1] + [("x", {"type": odd, "text": TEXT, "part": TEXT_PART})] + events[-1:]
+            self.assertFalse(holds_end("openai", sse(events)), odd)
 
     def test_one_whole_response_object_holds_its_end_by_its_stop_reason_or_status(self):
         self.assertTrue(holds_end("anthropic", a_object()))
@@ -309,6 +338,10 @@ class TestHoldsEnd(unittest.TestCase):
                         b"event: x\ndata: [1]\n\n", sse(odd_a), *map(sse, odd_b), DEEP,
                         b"event: x\ndata: " + b"[" * 200000 + b"\n\n", b"data: " + b"{\"a\":" * 200000):
                 self.assertFalse(holds_end(provider, raw), (provider, raw[:40]))
+            for odd in (["response.completed"], {"response.completed": 1}, ["message_stop"]):   # a type that is no string
+                self.assertFalse(holds_end(provider, sse([("x", {"type": odd, "response": {"output": []}})])), odd)
+                body = {"object": "response", "type": odd, "status": odd, "stop_reason": None, "output": []}
+                self.assertFalse(holds_end(provider, json.dumps(body).encode()), odd)
 
 
 class DispatchCase(TD.LogCase):

@@ -38,9 +38,11 @@ stream: an Anthropic message with a stop reason, or an OpenAI response whose sta
 ``completed`` or ``incomplete``, or ``failed`` with an answer. An event counts when its
 own line arrived whole, even if the blank line that ends it did not, so a stream that
 lacks only its last line break still holds its end, and one cut inside the event's JSON
-does not. An event line nested too deeply to parse holds no end. It reads only the envelope: event types,
-each item's type and status, and whether an item has content. It reads no answer text,
-parses no verdict and does not raise on bytes that are not a response.
+does not. An event line nested too deeply to parse holds no end. ``holds_end`` reads only the envelope:
+event types, each item's type and status, whether an item has content, and the type of a
+done event's part. A done event counts by its type alone, so one with empty text counts
+too. It reads no answer text, parses no verdict and does not raise on bytes that are not
+a response.
 
 The synthetic stream builders at the end produce provider-shaped streams for the tests
 and the development dry run. They are never sent anywhere.
