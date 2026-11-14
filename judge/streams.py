@@ -22,10 +22,15 @@ complete stream; partial content is never read.
 is in them and however they arrived. For Anthropic that is a ``message_delta`` with a stop
 reason and a ``message_stop``. For OpenAI it is a ``response.completed`` or
 ``response.incomplete`` event, or a ``response.failed`` event whose response carries an
-answer, meaning a message item with content or a refusal. For either it is also a body
-that is one whole JSON response object in place of a stream: an Anthropic message with a
-stop reason, or an OpenAI response whose status is ``completed`` or ``incomplete``, or
-``failed`` with an answer. It reads no answer text and parses no verdict.
+answer, meaning a message item with content or a refusal, or a ``response.failed`` event
+together with a ``response.output_item.done`` event whose item is such an answer. For
+either it is also a body that is one whole JSON response object in place of a stream: an
+Anthropic message with a stop reason, or an OpenAI response whose status is ``completed``
+or ``incomplete``, or ``failed`` with an answer. An event counts when its own line arrived
+whole, even if the blank line that ends it did not, so a stream that lacks only its last
+line break still holds its end, and one cut inside the event's JSON does not. An event
+line nested too deeply to parse holds no end. It reads no answer text, parses no verdict
+and does not raise on bytes that are not a response.
 
 The synthetic stream builders at the end produce provider-shaped streams for the tests
 and the development dry run. They are never sent anywhere.
@@ -200,7 +205,10 @@ def _carries_answer(response) -> bool:
 
 def holds_end(provider: str, raw: bytes) -> bool:
     """Whether ``raw`` holds the provider's own end of a response (see the module docstring)."""
-    objs = [obj for _, obj in _json_events(raw)[0]]
+    try:
+        objs = [obj for _, obj in _json_events(raw + b"\n\n")[0]]
+    except RecursionError:
+        objs = []
     try:
         body = json.loads(raw)
     except (ValueError, RecursionError):
@@ -218,6 +226,10 @@ def holds_end(provider: str, raw: bytes) -> bool:
             return True
         if o.get("type") == "response.failed" and _carries_answer(o.get("response")):
             return True
+    done = any(o.get("type") == "response.output_item.done" and _carries_answer({"output": [o.get("item")]})
+               for o in objs)
+    if done and any(o.get("type") == "response.failed" for o in objs):
+        return True
     return body.get("object") == "response" and (
         body.get("status") in ("completed", "incomplete")
         or (body.get("status") == "failed" and _carries_answer(body)))

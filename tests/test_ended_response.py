@@ -34,6 +34,9 @@ A_ERROR_EVENT = ("error", {"type": "error", "error": {"type": "overloaded_error"
 B_ERROR_EVENT = ("error", {"type": "error", "code": "server_error", "message": "x", "param": None})
 A_HEADERS = {"anthropic-workspace-id": WS}
 PAUSED = "the bytes hold the provider's end of a response"
+# A ping event, then an event line nested too deeply for the JSON reader.
+DEEP = b'event: ping\ndata: {"type": "ping"}\n\n' + b"data: " + b"[" * 200000 + b"\n\n"
+REASONING_ITEM = {"id": "rs_1", "type": "reasoning", "summary": []}
 
 
 def a_stream(**kw):
@@ -63,8 +66,22 @@ def bare_failed(error=SERVER_ERROR, output=()):
     return events
 
 
+def delivered_then_failed(item):
+    """The events of a B stream that delivers ``item`` in ``response.output_item.done`` and
+    then ends in ``response.failed`` with an empty output."""
+    events = b_stream(status="failed", error=SERVER_ERROR)
+    events[-1][1]["response"].update(output=[])
+    done = ("response.output_item.done", {"type": "response.output_item.done", "output_index": 1, "item": item})
+    return events[:-1] + [done] + events[-1:]
+
+
 def ok(events, headers=None):
     return Exchange(200, headers or {}, sse(events), None, None)
+
+
+def message_item():
+    """The finished message item that a completed B response carries."""
+    return b_stream()[-1][1]["response"]["output"][1]
 
 
 def ended_attempts():
@@ -91,6 +108,12 @@ def ended_attempts():
          Exchange(200, dict(A_HEADERS, **{"content-type": "application/json"}), a_object(), None, None)),
         ("B a 500 whose body is a whole stream", "B", Exchange(500, {}, sse(done_b), None, None)),
         ("A a 529 whose body is a whole stream", "A", Exchange(529, A_HEADERS, sse(done_a), None, None)),
+        ("B a whole stream that lacks only its last line break", "B",
+         Exchange(200, {}, sse(done_b)[:-1], "IncompleteRead: connection closed", None)),
+        ("A a whole stream that lacks only its last line break", "A",
+         Exchange(200, A_HEADERS, sse(done_a)[:-1], "IncompleteRead: connection closed", None)),
+        ("B its answer in an item-done event, then failed with an empty output", "B",
+         ok(delivered_then_failed(message_item()))),
     ]
 
 
@@ -125,6 +148,14 @@ def unended_attempts():
         ("B a terminal event that is not valid JSON", "B", Exchange(200, {}, broken, None, None)),
         ("A an error event and no end", "A", ok(anthropic_events(None)[:2] + [A_ERROR_EVENT], A_HEADERS)),
         ("B an error event and nothing else", "B", ok([B_ERROR_EVENT])),
+        ("A a 529 whose body holds an event line nested too deeply to parse", "A",
+         Exchange(529, A_HEADERS, DEEP, None, None)),
+        ("B a 500 whose body holds an event line nested too deeply to parse", "B", Exchange(500, {}, DEEP, None, None)),
+        ("A cut inside the line of its last event", "A", Exchange(200, A_HEADERS, raw_a[:-10], reset, None)),
+        ("B cut inside the line of its terminal event", "B", Exchange(200, {}, raw_b[:-10], reset, None)),
+        ("B its answer in an item-done event, then cut with no failed event", "B",
+         Exchange(200, {}, sse(delivered_then_failed(message_item())[:-1]), reset, None)),
+        ("B failed after an item-done event that is no answer", "B", ok(delivered_then_failed(REASONING_ITEM))),
     ]
 
 
@@ -161,6 +192,27 @@ class TestHoldsEnd(unittest.TestCase):
             self.assertEqual(holds_end("openai", sse(events)), expected, final["output"])
             self.assertEqual(holds_end("openai", json.dumps(final).encode()), expected, final["output"])
 
+    def test_a_stream_that_lacks_only_its_last_line_break_still_holds_its_end(self):
+        for provider, raw in (("anthropic", sse(a_stream())), ("openai", sse(b_stream()))):
+            for missing in (1, 2):                                     # one line break gone, or both
+                self.assertTrue(holds_end(provider, raw[:-missing]), (provider, missing))
+            for missing in (3, 10, 40):                                # cut inside the end event's own line
+                self.assertFalse(holds_end(provider, raw[:-missing]), (provider, missing))
+        named = sse(a_stream())
+        self.assertFalse(holds_end("anthropic", named[:named.index(b'data: {"type": "message_stop"}')]))
+
+    def test_an_answer_in_an_item_done_event_counts_only_beside_a_failed_response(self):
+        refusal_item = {"type": "refusal", "refusal": "I can't help."}
+        empty_message = {"id": "msg_1", "type": "message", "role": "assistant", "status": "in_progress", "content": []}
+        for item in (message_item(), refusal_item):
+            events = delivered_then_failed(item)
+            self.assertTrue(holds_end("openai", sse(events)), item["type"])
+            self.assertTrue(holds_end("openai", sse(events[-1:] + events[:-1])), item["type"])   # in either order
+            self.assertFalse(holds_end("openai", sse(events[:-1])), item["type"])                # no failed event
+            self.assertFalse(holds_end("anthropic", sse(events)), item["type"])
+        for item in (REASONING_ITEM, empty_message, "message", None, ["message"], 5):
+            self.assertFalse(holds_end("openai", sse(delivered_then_failed(item))), item)
+
     def test_one_whole_response_object_holds_its_end_by_its_stop_reason_or_status(self):
         self.assertTrue(holds_end("anthropic", a_object()))
         self.assertTrue(holds_end("anthropic", a_object("max_tokens")))
@@ -187,7 +239,8 @@ class TestHoldsEnd(unittest.TestCase):
                                   {"output": ["message", 5, None]}, {"output": {"type": "message", "content": "x"}})]
         for provider in ("anthropic", "openai"):
             for raw in (b"", b"not json", b"[]", b"null", b"5", b'"message"', b"\xff\xfe", b"[" * 200000,
-                        b"event: x\ndata: [1]\n\n", sse(odd_a), *map(sse, odd_b)):
+                        b"event: x\ndata: [1]\n\n", sse(odd_a), *map(sse, odd_b), DEEP,
+                        b"event: x\ndata: " + b"[" * 200000 + b"\n\n", b"data: " + b"{\"a\":" * 200000):
                 self.assertFalse(holds_end(provider, raw), (provider, raw[:40]))
 
 
@@ -371,7 +424,11 @@ class TestRecovery(DispatchCase):
                  ("B a whole stream that lost its opening events", "B", sse(b_stream()[2:]), None),
                  ("B failed, carrying its answer", "B", sse(b_stream(status="failed", error=SERVER_ERROR)), 200),
                  ("B completed, then an error event", "B", sse(b_stream() + [B_ERROR_EVENT]), 200),
-                 ("A a whole message, then an error event", "A", sse(done_a + [A_ERROR_EVENT]), 200)]
+                 ("A a whole message, then an error event", "A", sse(done_a + [A_ERROR_EVENT]), 200),
+                 ("A a whole stream that lacks only its last line break", "A", sse(done_a)[:-1], 200),
+                 ("B a whole stream that lacks only its last line break", "B", sse(b_stream())[:-1], 200),
+                 ("B its answer in an item-done event, then failed", "B", sse(delivered_then_failed(message_item())),
+                  200)]
         for n, (name, judge, raw, status) in enumerate(cases):
             rec = self.rebuilt(n, judge, raw)
             self.assertEqual((rec["outcome"], rec["halt_kind"], rec["http_status"], rec["parse"], rec["failed_checks"]),
@@ -399,7 +456,10 @@ class TestRecovery(DispatchCase):
                  ("B an error event and nothing else", "B", sse([B_ERROR_EVENT]), 200),
                  ("B a transient error body", "B", TD.b_err(429, "rate_limit_exceeded", etype="requests").raw, None),
                  ("A an overloaded error body", "A", TD.a_err(529, "overloaded_error").raw, None),
-                 ("B bytes that hold no response", "B", b"bytes that hold no response", None)]
+                 ("B bytes that hold no response", "B", b"bytes that hold no response", None),
+                 ("A an event line nested too deeply to parse", "A", DEEP, None),
+                 ("B an event line nested too deeply to parse", "B", DEEP, None),
+                 ("B cut inside the line of its terminal event", "B", sse(b_stream())[:-10], 200)]
         for n, (name, judge, raw, status) in enumerate(cases):
             rec = self.rebuilt(n, judge, raw)
             self.assertEqual((rec["outcome"], rec["halt_kind"], rec["http_status"]), (TRANSPORT, None, status), name)

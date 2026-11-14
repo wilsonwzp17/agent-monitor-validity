@@ -999,6 +999,16 @@ MUTATIONS = [
      '        body.get("status") in ("completed", "incomplete")\n', "        True\n"),
     ("miss a whole failed response object that carries its answer", "judge/streams.py",
      '\n        or (body.get("status") == "failed" and _carries_answer(body)))', ")"),
+    ("let an event line nested too deeply stop the reader of a provider's end", "judge/streams.py",
+     "    except RecursionError:\n        objs = []\n", "    except ZeroDivisionError:\n        objs = []\n"),
+    ("miss an end event that lacks only its last blank line", "judge/streams.py",
+     '_json_events(raw + b"\\n\\n")[0]', "_json_events(raw)[0]"),
+    ("miss an answer delivered in an item-done event before a failed response", "judge/streams.py",
+     '    if done and any(o.get("type") == "response.failed" for o in objs):\n', "    if False:\n"),
+    ("take an item-done answer with no failed response as judge B's end", "judge/streams.py",
+     '    if done and any(o.get("type") == "response.failed" for o in objs):\n', "    if done:\n"),
+    ("take any item-done event beside a failed response as judge B's end", "judge/streams.py",
+     ' and _carries_answer({"output": [o.get("item")]})', ""),
 ]
 
 

@@ -95,12 +95,12 @@ A count that fails, cannot be read, comes from another scope or holds no whole, 
 
 The dispatcher sends a slot again automatically only after a transport failure: the same bytes, the same slot, at most three retries with backoff. A response that the provider ended and that arrives as a normal stream is never sent again without a note. It ends its slot, or, when it fails a per-response check, it is recorded as a `response_check` halt: the bytes and the record stay in the log, the stage stops, a restart is refused until a correction note, and after the note the slot goes out as its next attempt.
 
-The retry is decided by how the bytes are classified, so one more rule keeps it from reaching a response that the provider ended. When an attempt would be retried, its bytes are not empty and they hold the provider's own end of a response, the dispatcher records it as a HALT with the halt kind `ended_response` and does not retry it. The bytes and the record stay in the log, the stage stops, a restart is refused until a correction note, and after the note the slot goes out as its next attempt. `holds_end` in [streams.py](../judge/streams.py) looks only for the end. It reads no answer text, and no verdict is parsed from a paused response.
+The retry is decided by how the bytes are classified, so one more rule keeps it from reaching a response that the provider ended. When an attempt would be retried, its bytes are not empty and they hold the provider's own end of a response, the dispatcher records it as a HALT with the halt kind `ended_response` and does not retry it. The bytes and the record stay in the log, the stage stops, a restart is refused until a correction note, and after the note the slot goes out as its next attempt. `holds_end` in [streams.py](../judge/streams.py) looks only for the end. It reads no answer text, and no verdict is parsed from a paused response. An event counts when its own line arrived whole, even if the blank line that ends it did not, so a whole stream that lacks only its last line break pauses, and one cut inside its end event's line is still retried. An event line nested too deeply to parse holds no end.
 
 | Judge | Bytes that hold the provider's end |
 |---|---|
 | A | a `message_delta` with a stop reason, and a `message_stop` |
-| B | a `response.completed` or `response.incomplete` event, or a `response.failed` event whose response carries a message item with content or a refusal |
+| B | a `response.completed` or `response.incomplete` event, or a `response.failed` event whose response carries a message item with content or a refusal, or a `response.failed` event together with a `response.output_item.done` event whose item is such a message or refusal |
 | either | a body that is one whole JSON response object in place of a stream: an A message with a stop reason, or a B response whose status is `completed` or `incomplete`, or `failed` with such an item |
 
 These attempts pause in place of a retry:
@@ -113,7 +113,7 @@ These attempts pause in place of a retry:
 
 These are retried automatically, as before: no response; a provider error body; a `response.failed` that carries no answer; a stream with an error event and no end; and a stream cut before the provider's end. For judge A that includes a stream cut after the stop reason and before `message_stop`. For judge B it includes a stream whose terminal event cannot be parsed.
 
-The rule changes nothing else. The request bytes, the configuration hash and the limit of three retries are the same, and a pause uses no retry. The paused call's reservation closes under the settle rule in [spending rules](#spending-rules) exactly as it did before, since that rule reads the status and the bytes and not the outcome. After the note the slot is sent again, and the paused response stays in the log as an attempt of the slot, not as its result.
+The rule changes nothing else. The request bytes, the configuration hash and the limit of three retries are the same, and a pause uses no retry. The paused call's reservation closes under the settle rule in [spending rules](#spending-rules) exactly as it did before, since that rule reads the status and the bytes and not the outcome. After the note the slot is sent again, and the paused response stays in the log as an attempt of the slot, not as its result. A slot that paused can be sent more than four times in all, one more for each correction note, and each send makes its own reservation. A paused judge A attempt that arrived with an error status is settled at zero by the ledger, as other Anthropic error responses are.
 
 ## Restart and reconciliation
 
