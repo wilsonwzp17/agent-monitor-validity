@@ -12,9 +12,20 @@ retries with exponential backoff (a server's ``retry-after`` is honored when lon
 to two minutes). A slot still without a complete response after three retries is
 INVALID. Any terminal outcome ends the slot, and a slot that ended is never sent again.
 
-**Halt.** A HALT outcome, a failed per-response check, or a repeated provider response id
-is logged as a HALT attempt and a halt record, and the dispatcher stops at once. It will
-not start again while any halt lacks a correction note (``AttemptLog.record_correction``).
+**An ended response is not retried.** A TRANSPORT attempt whose bytes are not empty and
+hold the provider's own end of a response (``streams.holds_end``) is recorded as a HALT
+with the halt kind ``ended_response`` in place of a retry. The bytes and the record are
+kept, the run stops, and the slot is sent again, as its next attempt, only after a
+correction note. This covers a failed B response that carries an answer, a stream that
+holds its end together with an error event, a whole response object in place of a
+stream, and an error status whose body is a whole stream. No answer is parsed to decide
+it. A failed response with no answer, no response, an error body and a stream cut before
+the provider's end are retried as before.
+
+**Halt.** A HALT outcome, a failed per-response check, a repeated provider response id or
+an ended response under the rule above is logged as a HALT attempt and a halt record, and
+the dispatcher stops at once. It will not start again while any halt lacks a correction
+note (``AttemptLog.record_correction``).
 
 **A response that cannot be read.** The raw response is on disk before anything reads it.
 If classifying it or running its checks raises, or gives a value the log cannot store, the
@@ -46,8 +57,10 @@ or spend-limit error halts until a correction note, a policy error on B is FILTE
 ends the slot, and a transient one is TRANSPORT. OpenAI marks some halting errors by the
 status alone, so a B body that would otherwise be TRANSPORT halts unless it is a known
 transient error. Anything else is taken as no response (TRANSPORT), whose slot is
-retried under the rule above. The workspace or project header check is listed as not
-applied.
+retried under the rule above. Rebuilt bytes that would be TRANSPORT and hold the
+provider's end of a response, such as a whole stream that does not open with a listed
+start event, are an ``ended_response`` HALT here too. The workspace or project header
+check is listed as not applied.
 
 **Transports.** ``FakeTransport`` returns scripted exchanges and records what it was sent;
 the tests and the dry run use only it. ``HttpsTransport`` sends the exact body bytes with
@@ -68,7 +81,7 @@ from http.client import HTTPException
 from . import requests as R
 from .outcomes import (ABSTAIN, CLASSIFICATION_ERROR, HALT, IMAGE_ERROR_CODES, MALFORMED, REFUSAL, TERMINAL,
                        TRANSPORT, VALID, Exchange, canonical_outcome, classification_failure, error_body_outcome)
-from .streams import parse_sse
+from .streams import holds_end, parse_sse
 
 CACHE_LIFETIME_S = 300
 B_LONG_CONTEXT_TOKENS = 272000               # judge B input above this is priced at the long-context rate
@@ -310,6 +323,16 @@ def _identity_checks(log, provider: str, judge: str, config_sha256: str, summary
     return checks
 
 
+def _pause_ended(provider: str, raw, oc: dict) -> dict:
+    """``oc``, unless it is TRANSPORT for bytes that hold the provider's own end of a
+    response: then a HALT of kind ``ended_response``, so the attempt is kept and nothing is
+    sent again until a correction note (see the module docstring)."""
+    if oc["outcome"] == TRANSPORT and raw and holds_end(provider, raw):
+        return dict(oc, outcome=HALT, retryable=False, halt_kind="ended_response",
+                    detail=f"{oc['detail']}; the bytes hold the provider's end of a response")
+    return oc
+
+
 def _response_fields(oc: dict, checks: list) -> dict:
     """The fields of an attempt record that come from reading its response. Raises if the
     log could not store one of them."""
@@ -403,6 +426,7 @@ def dispatch_trajectory(trace_key: str, requests: dict, config_sha256: str, tran
             headers = {k.lower(): v for k, v in (exchange.headers or {}).items()}
             try:
                 oc, checks = canonical_outcome(request.provider, exchange), []
+                oc = _pause_ended(request.provider, exchange.raw, oc)
                 if oc["outcome"] in TERMINAL and (oc["summary"] or {}).get("complete"):
                     checks = _identity_checks(log, request.provider, judge, config_sha256, oc["summary"], headers,
                                               workspace, ref, project)
@@ -478,6 +502,7 @@ def recover_attempt(log, reservation: dict) -> dict:
         exchange = Exchange(status, {}, raw, None if status else "the response's status was not kept", None)
         error_body = None if status else error_body_outcome(provider, raw)
         oc, checks = error_body or canonical_outcome(provider, exchange), []
+        oc = _pause_ended(provider, raw, oc)
         summary = oc["summary"] or {}
         if oc["outcome"] in TERMINAL and summary.get("complete"):
             first = log.first_model(config_sha256, judge)

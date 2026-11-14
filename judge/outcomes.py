@@ -22,6 +22,16 @@ not an outcome of the slot. It stops the run, and ``halt_kind`` says why: ``auth
 or configuration error halts because identical retries cannot succeed, and it is never an
 invalid verdict. Every non-VALID terminal outcome is invalid for its slot.
 
+One kind of TRANSPORT attempt is not retried. The table is decided by how the bytes are
+classified, so bytes that hold the provider's own end of a response can still be
+TRANSPORT in it: a failed B response that carries an answer, a stream that holds its end
+together with an error event, a whole response object in place of a stream, or an error
+status whose body is a whole stream. The dispatcher records such an attempt as a HALT
+with the halt kind ``ended_response`` (``dispatch._pause_ended``, ``streams.holds_end``).
+The attempt is kept, the run stops, and the slot is sent again only after a correction
+note. ``canonical_outcome`` itself still returns TRANSPORT for such bytes, and no answer
+is parsed to decide it.
+
 An attempt that cannot be classified, because reading it raised, has the halt kind
 ``classification_error`` (``classification_failure``).
 """

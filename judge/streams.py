@@ -18,6 +18,15 @@ A summary is ``complete`` only when the stream reached its provider's end: for A
 terminal response event with no error event. The answer text is extracted only from a
 complete stream; partial content is never read.
 
+``holds_end`` says whether bytes hold the provider's own end of a response, whatever else
+is in them and however they arrived. For Anthropic that is a ``message_delta`` with a stop
+reason and a ``message_stop``. For OpenAI it is a ``response.completed`` or
+``response.incomplete`` event, or a ``response.failed`` event whose response carries an
+answer, meaning a message item with content or a refusal. For either it is also a body
+that is one whole JSON response object in place of a stream: an Anthropic message with a
+stop reason, or an OpenAI response whose status is ``completed`` or ``incomplete``, or
+``failed`` with an answer. It reads no answer text and parses no verdict.
+
 The synthetic stream builders at the end produce provider-shaped streams for the tests
 and the development dry run. They are never sent anywhere.
 """
@@ -178,6 +187,40 @@ def openai_summary(raw: bytes) -> dict:
         s["text"] = "".join(texts)
         s["refusal"] = "\n".join(refusals) if refusals else None
     return s
+
+
+def _carries_answer(response) -> bool:
+    """Whether a Responses object carries an answer: a message item with content, or a refusal."""
+    output = response.get("output") if isinstance(response, dict) else None
+    return isinstance(output, list) and any(
+        isinstance(item, dict) and (item.get("type") == "refusal"
+                                    or (item.get("type") == "message" and bool(item.get("content"))))
+        for item in output)
+
+
+def holds_end(provider: str, raw: bytes) -> bool:
+    """Whether ``raw`` holds the provider's own end of a response (see the module docstring)."""
+    objs = [obj for _, obj in _json_events(raw)[0]]
+    try:
+        body = json.loads(raw)
+    except (ValueError, RecursionError):
+        body = None
+    if not isinstance(body, dict):
+        body = {}
+    if provider == "anthropic":
+        stop = any(o.get("type") == "message_delta" and isinstance(o.get("delta"), dict)
+                   and o["delta"].get("stop_reason") is not None for o in objs)
+        if stop and any(o.get("type") == "message_stop" for o in objs):
+            return True
+        return body.get("type") == "message" and body.get("stop_reason") is not None
+    for o in objs:
+        if o.get("type") in ("response.completed", "response.incomplete"):
+            return True
+        if o.get("type") == "response.failed" and _carries_answer(o.get("response")):
+            return True
+    return body.get("object") == "response" and (
+        body.get("status") in ("completed", "incomplete")
+        or (body.get("status") == "failed" and _carries_answer(body)))
 
 
 # ---------------------------------------------------------------- synthetic streams

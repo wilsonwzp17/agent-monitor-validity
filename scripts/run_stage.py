@@ -89,7 +89,8 @@ again; an error event that opens a stream, or a provider error body, halts, ends
 slot as FILTERED or is retried, as its error shows, and a B error body that would
 otherwise be a transport failure halts unless it is a known transient error, since
 OpenAI marks some halting errors by the status alone; a cut or unrecognized response is
-a transport failure whose slot is retried under the usual retry rule. A response that
+a transport failure whose slot is retried under the usual retry rule, unless its bytes
+hold the provider's end of a response, which is an ended_response halt. A response that
 raises while it is read is recorded with a classification_error halt; if it may be
 complete, its slot has ended and it is never sent again.
 The report prints the gates for review and never acts on them to select a judge. A halt
@@ -661,7 +662,8 @@ def rebuild_orphans(log, ledger, items, run_id: str, stage: str, config_sha256: 
     complete stream is recorded as it was and a slot it ended is never sent again, an
     error event that opens a stream or an error body halts, ends the slot as FILTERED or
     is retried, and a cut or unrecognized response is a transport failure retried under
-    the usual rule. Each must have its reservation in the ledger, which then closes from
+    the usual rule, or an ``ended_response`` halt when its bytes hold the provider's end
+    of a response. Each must have its reservation in the ledger, which then closes from
     the rebuilt record. A stop during a send closes that attempt's reservation with no
     record and the next start reserves the attempt again, so the last reservation is the
     one the raw response answers; the ledger keeps only one open, so the others are
