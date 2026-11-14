@@ -22,15 +22,18 @@ complete stream; partial content is never read.
 is in them and however they arrived. For Anthropic that is a ``message_delta`` with a stop
 reason and a ``message_stop``. For OpenAI it is a ``response.completed`` or
 ``response.incomplete`` event, or a ``response.failed`` event whose response carries an
-answer, meaning a message item with content or a refusal, or a ``response.failed`` event
-together with a ``response.output_item.done`` event whose item is such an answer. For
-either it is also a body that is one whole JSON response object in place of a stream: an
-Anthropic message with a stop reason, or an OpenAI response whose status is ``completed``
-or ``incomplete``, or ``failed`` with an answer. An event counts when its own line arrived
-whole, even if the blank line that ends it did not, so a stream that lacks only its last
-line break still holds its end, and one cut inside the event's JSON does not. An event
-line nested too deeply to parse holds no end. It reads no answer text, parses no verdict
-and does not raise on bytes that are not a response.
+answer, or a ``response.failed`` event together with a ``response.output_item.done`` event
+whose item is an answer. An answer is a message item with content, or a refusal, that the
+provider does not mark as unfinished. An item whose status is ``in_progress`` or
+``incomplete`` is part of an answer and holds no end, so a failed response that carries
+only such an item is retried, as one with no answer is, and its bytes are kept. For
+either provider it is also a body that is one whole JSON response object in place of a
+stream: an Anthropic message with a stop reason, or an OpenAI response whose status is
+``completed`` or ``incomplete``, or ``failed`` with an answer. An event counts when its
+own line arrived whole, even if the blank line that ends it did not, so a stream that
+lacks only its last line break still holds its end, and one cut inside the event's JSON
+does not. An event line nested too deeply to parse holds no end. It reads no answer text,
+parses no verdict and does not raise on bytes that are not a response.
 
 The synthetic stream builders at the end produce provider-shaped streams for the tests
 and the development dry run. They are never sent anywhere.
@@ -195,11 +198,13 @@ def openai_summary(raw: bytes) -> dict:
 
 
 def _carries_answer(response) -> bool:
-    """Whether a Responses object carries an answer: a message item with content, or a refusal."""
+    """Whether a Responses object carries an answer: a message item with content, or a refusal,
+    that the provider does not mark as unfinished (status ``in_progress`` or ``incomplete``)."""
     output = response.get("output") if isinstance(response, dict) else None
     return isinstance(output, list) and any(
         isinstance(item, dict) and (item.get("type") == "refusal"
                                     or (item.get("type") == "message" and bool(item.get("content"))))
+        and item.get("status") not in ("in_progress", "incomplete")
         for item in output)
 
 

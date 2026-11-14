@@ -100,18 +100,18 @@ The retry is decided by how the bytes are classified, so one more rule keeps it 
 | Judge | Bytes that hold the provider's end |
 |---|---|
 | A | a `message_delta` with a stop reason, and a `message_stop` |
-| B | a `response.completed` or `response.incomplete` event, or a `response.failed` event whose response carries a message item with content or a refusal, or a `response.failed` event together with a `response.output_item.done` event whose item is such a message or refusal |
+| B | a `response.completed` or `response.incomplete` event, or a `response.failed` event whose response carries a message item with content or a refusal that the provider does not mark as unfinished (status `in_progress` or `incomplete`), or a `response.failed` event together with a `response.output_item.done` event whose item is such a message or refusal |
 | either | a body that is one whole JSON response object in place of a stream: an A message with a stop reason, or a B response whose status is `completed` or `incomplete`, or `failed` with such an item |
 
 These attempts pause in place of a retry:
 
-- a B stream that ends in `response.failed` with a transient, missing or unlisted error code while the failed response carries an answer;
+- a B stream that ends in `response.failed` with a transient, missing or unlisted error code while the failed response carries a finished answer;
 - a stream that holds its end together with an `error` event, for either judge, or a B `response.completed` followed by a `response.failed`;
 - an HTTP 200 whose body is one whole response object in place of a stream;
 - an error status that the outcome table retries, such as a 500 or a 529, whose body is a whole stream;
 - in a rebuild after a stop, a whole stream that does not open with one of the listed start events.
 
-These are retried automatically, as before: no response; a provider error body; a `response.failed` that carries no answer; a stream with an error event and no end; and a stream cut before the provider's end. For judge A that includes a stream cut after the stop reason and before `message_stop`. For judge B it includes a stream whose terminal event cannot be parsed.
+These are retried automatically, as before: no response; a provider error body; a `response.failed` that carries no answer, or only part of one in an item the provider marks `in_progress` or `incomplete`; a stream with an error event and no end; and a stream cut before the provider's end. For judge A that includes a stream cut after the stop reason and before `message_stop`. For judge B it includes a stream whose terminal event cannot be parsed.
 
 The rule changes nothing else. The request bytes, the configuration hash and the limit of three retries are the same, and a pause uses no retry. The paused call's reservation closes under the settle rule in [spending rules](#spending-rules) exactly as it did before, since that rule reads the status and the bytes and not the outcome. After the note the slot is sent again, and the paused response stays in the log as an attempt of the slot, not as its result. A slot that paused can be sent more than four times in all, one more for each correction note, and each send makes its own reservation. A paused judge A attempt that arrived with an error status is settled at zero by the ledger, as other Anthropic error responses are.
 

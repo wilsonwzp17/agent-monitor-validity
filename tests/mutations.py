@@ -1009,6 +1009,14 @@ MUTATIONS = [
      '    if done and any(o.get("type") == "response.failed" for o in objs):\n', "    if done:\n"),
     ("take any item-done event beside a failed response as judge B's end", "judge/streams.py",
      ' and _carries_answer({"output": [o.get("item")]})', ""),
+    ("take part of an answer in a failed response as a finished one", "judge/streams.py",
+     '        and item.get("status") not in ("in_progress", "incomplete")\n', ""),
+    ("take an answer item still in progress as a finished one", "judge/streams.py",
+     'item.get("status") not in ("in_progress", "incomplete")', 'item.get("status") not in ("incomplete",)'),
+    ("take an answer item marked incomplete as a finished one", "judge/streams.py",
+     'item.get("status") not in ("in_progress", "incomplete")', 'item.get("status") not in ("in_progress",)'),
+    ("retry a failed response whose answer item carries no status", "judge/streams.py",
+     'item.get("status") not in ("in_progress", "incomplete")', 'item.get("status") == "completed"'),
 ]
 
 

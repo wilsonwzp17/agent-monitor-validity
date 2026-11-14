@@ -75,6 +75,14 @@ def delivered_then_failed(item):
     return events[:-1] + [done] + events[-1:]
 
 
+def partly_answered(status="in_progress"):
+    """The events of a B stream that ends in ``response.failed`` while the provider marks its
+    message item, with the text that had arrived, as ``status``: part of an answer."""
+    events = b_stream(status="failed", error=SERVER_ERROR)
+    events[-1][1]["response"]["output"][1]["status"] = status
+    return events
+
+
 def ok(events, headers=None):
     return Exchange(200, headers or {}, sse(events), None, None)
 
@@ -156,6 +164,12 @@ def unended_attempts():
         ("B its answer in an item-done event, then cut with no failed event", "B",
          Exchange(200, {}, sse(delivered_then_failed(message_item())[:-1]), reset, None)),
         ("B failed after an item-done event that is no answer", "B", ok(delivered_then_failed(REASONING_ITEM))),
+        ("B failed, carrying part of an answer in an item still in progress", "B", ok(partly_answered())),
+        ("B failed, carrying part of an answer in an item marked incomplete", "B", ok(partly_answered("incomplete"))),
+        ("B a 200 whose body is a failed response object with part of an answer", "B",
+         Exchange(200, {}, json.dumps(partly_answered()[-1][1]["response"]).encode(), None, None)),
+        ("B failed after an item-done event whose item is marked incomplete", "B",
+         ok(delivered_then_failed(dict(message_item(), status="incomplete")))),
     ]
 
 
@@ -182,11 +196,18 @@ class TestHoldsEnd(unittest.TestCase):
         refusal_item = [{"type": "refusal", "refusal": "I can't help."}]
         empty_message = [{"id": "msg_1", "type": "message", "role": "assistant", "status": "in_progress",
                           "content": []}]
+        no_status = {k: v for k, v in message_item().items() if k != "status"}
         cases = [(b_stream(status="failed", error=SERVER_ERROR), True),
                  (bare_failed(output=refusal_item), True),
+                 (bare_failed(output=[no_status]), True),                 # nothing says it is unfinished
+                 (bare_failed(output=[dict(message_item(), status="odd")]), True),
                  (bare_failed(), False),
                  (bare_failed(output=[{"id": "rs_1", "type": "reasoning", "summary": []}]), False),
-                 (bare_failed(output=empty_message), False)]
+                 (bare_failed(output=empty_message), False),
+                 (bare_failed(output=[dict(message_item(), content=[])]), False),       # finished, and empty
+                 (partly_answered(), False),                              # part of an answer
+                 (partly_answered("incomplete"), False),
+                 (bare_failed(output=[dict(message_item(), status="in_progress")] + refusal_item), True)]
         for events, expected in cases:
             final = events[-1][1]["response"]
             self.assertEqual(holds_end("openai", sse(events)), expected, final["output"])
@@ -210,7 +231,9 @@ class TestHoldsEnd(unittest.TestCase):
             self.assertTrue(holds_end("openai", sse(events[-1:] + events[:-1])), item["type"])   # in either order
             self.assertFalse(holds_end("openai", sse(events[:-1])), item["type"])                # no failed event
             self.assertFalse(holds_end("anthropic", sse(events)), item["type"])
-        for item in (REASONING_ITEM, empty_message, "message", None, ["message"], 5):
+        for item in (REASONING_ITEM, empty_message, dict(message_item(), content=[]),
+                     dict(message_item(), status="in_progress"), dict(message_item(), status="incomplete"),
+                     dict(refusal_item, status="in_progress"), "message", None, ["message"], 5):
             self.assertFalse(holds_end("openai", sse(delivered_then_failed(item))), item)
 
     def test_one_whole_response_object_holds_its_end_by_its_stop_reason_or_status(self):
@@ -453,6 +476,8 @@ class TestRecovery(DispatchCase):
         cases = [("A cut after the stop reason", "A", raw_a[:raw_a.index(b"event: message_stop")], 200),
                  ("A cut in the middle", "A", raw_a[:len(raw_a) // 2], 200),
                  ("B failed with no answer", "B", sse(bare_failed()), 200),
+                 ("B failed, carrying part of an answer", "B", sse(partly_answered()), 200),
+                 ("B failed, carrying an answer item marked incomplete", "B", sse(partly_answered("incomplete")), 200),
                  ("B an error event and nothing else", "B", sse([B_ERROR_EVENT]), 200),
                  ("B a transient error body", "B", TD.b_err(429, "rate_limit_exceeded", etype="requests").raw, None),
                  ("A an overloaded error body", "A", TD.a_err(529, "overloaded_error").raw, None),
@@ -565,6 +590,22 @@ class TestTheStageRunner(TRS.RunnerCase):
         self.assertEqual([(r["attempt"], r["outcome"]) for r in self.log.attempts(self.key, self.config, "B", 1)],
                          [(1, TRANSPORT), (2, VALID)])
         self.assertEqual(report["gates"]["halts"], [])
+
+    def test_a_failed_b_response_that_carries_part_of_an_answer_is_retried_and_its_bytes_are_kept(self):
+        def part(exchange):
+            return exchange._replace(raw=sse(partly_answered()))
+
+        report, provider = self.stage("P1", self.its, self.led, provider=OneSend("B1", part))
+        self.assertTrue(report["complete"], report["stopped"])
+        self.assertEqual([r.judge for r in provider.sent], ["A", "A", "A", "B", "B"])
+        self.assertEqual(provider.sent[3].body, provider.sent[4].body)
+        records = self.log.attempts(self.key, self.config, "B", 1)
+        self.assertEqual([(r["attempt"], r["outcome"], r["halt_kind"]) for r in records],
+                         [(1, TRANSPORT, None), (2, VALID, None)])
+        self.assertIsNone(records[0]["parse"])
+        self.assertEqual(report["gates"]["halts"], [])
+        kept = (self.log.slot_dir(self.key, self.config, "B", 1) / "1.raw").read_bytes()
+        self.assertEqual(kept, sse(partly_answered()))
 
     def test_a_rebuilt_whole_stream_that_opens_with_a_ping_waits_for_a_note(self):
         with stop_before_the_record("A1"):

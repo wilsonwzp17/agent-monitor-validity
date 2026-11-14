@@ -16,11 +16,11 @@ INVALID. Any terminal outcome ends the slot, and a slot that ended is never sent
 hold the provider's own end of a response (``streams.holds_end``) is recorded as a HALT
 with the halt kind ``ended_response`` in place of a retry. The bytes and the record are
 kept, the run stops, and the slot is sent again, as its next attempt, only after a
-correction note. This covers a failed B response that carries an answer, a stream that
+correction note. This covers a failed B response that carries a finished answer, a stream that
 holds its end together with an error event, a whole response object in place of a
 stream, and an error status whose body is a whole stream. No answer is parsed to decide
-it. A failed response with no answer, no response, an error body and a stream cut before
-the provider's end are retried as before.
+it. A failed response with no answer or with only part of one, no response, an error body
+and a stream cut before the provider's end are retried as before.
 
 **Halt.** A HALT outcome, a failed per-response check, a repeated provider response id or
 an ended response under the rule above is logged as a HALT attempt and a halt record, and

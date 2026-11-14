@@ -24,7 +24,7 @@ invalid verdict. Every non-VALID terminal outcome is invalid for its slot.
 
 One kind of TRANSPORT attempt is not retried. The table is decided by how the bytes are
 classified, so bytes that hold the provider's own end of a response can still be
-TRANSPORT in it: a failed B response that carries an answer, a stream that holds its end
+TRANSPORT in it: a failed B response that carries a finished answer, a stream that holds its end
 together with an error event, a whole response object in place of a stream, or an error
 status whose body is a whole stream. The dispatcher records such an attempt as a HALT
 with the halt kind ``ended_response`` (``dispatch._pause_ended``, ``streams.holds_end``).
