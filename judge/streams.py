@@ -21,18 +21,25 @@ complete stream; partial content is never read.
 ``holds_end`` says whether bytes hold the provider's own end of a response, whatever else
 is in them and however they arrived. For Anthropic that is a ``message_delta`` with a stop
 reason and a ``message_stop``. For OpenAI it is a ``response.completed`` or
-``response.incomplete`` event, or a ``response.failed`` event whose response carries an
-answer, or a ``response.failed`` event together with a ``response.output_item.done`` event
-whose item is an answer. An answer is a message item with content, or a refusal, that the
-provider does not mark as unfinished. An item whose status is ``in_progress`` or
-``incomplete`` is part of an answer and holds no end, so a failed response that carries
-only such an item is retried, as one with no answer is, and its bytes are kept. For
+``response.incomplete`` event, or a ``response.failed`` event that comes with an answer.
+This is a narrower question than ``complete`` above: a failed event is the provider's end
+of the stream for the summary and the ledger, but it holds an end here only with an
+answer. An answer is a message item with content, or a refusal. A failed event comes with
+one in two ways. Its own response lists an answer item that the provider does not mark as
+unfinished: a status of ``in_progress`` or ``incomplete`` makes the item part of an answer,
+and any other status, a null one or none at all does not. Or an event in the stream marks
+an answer as done, whatever the item's status says: a ``response.output_item.done`` whose
+item is an answer, a ``response.output_text.done``, a ``response.refusal.done``, or a
+``response.content_part.done`` for output text or a refusal. A failed response that
+carries only part of an answer, with no such event, holds no end and is retried, as one
+with no answer is, and its bytes are kept. For
 either provider it is also a body that is one whole JSON response object in place of a
 stream: an Anthropic message with a stop reason, or an OpenAI response whose status is
 ``completed`` or ``incomplete``, or ``failed`` with an answer. An event counts when its
 own line arrived whole, even if the blank line that ends it did not, so a stream that
 lacks only its last line break still holds its end, and one cut inside the event's JSON
-does not. An event line nested too deeply to parse holds no end. It reads no answer text,
+does not. An event line nested too deeply to parse holds no end. It reads only the envelope: event types,
+each item's type and status, and whether an item has content. It reads no answer text,
 parses no verdict and does not raise on bytes that are not a response.
 
 The synthetic stream builders at the end produce provider-shaped streams for the tests
@@ -197,15 +204,28 @@ def openai_summary(raw: bytes) -> dict:
     return s
 
 
+def _is_answer(item) -> bool:
+    """Whether an output item is an answer: a refusal, or a message item with content."""
+    return isinstance(item, dict) and (item.get("type") == "refusal"
+                                       or (item.get("type") == "message" and bool(item.get("content"))))
+
+
 def _carries_answer(response) -> bool:
-    """Whether a Responses object carries an answer: a message item with content, or a refusal,
-    that the provider does not mark as unfinished (status ``in_progress`` or ``incomplete``)."""
+    """Whether a Responses object lists an answer item that the provider does not mark as
+    unfinished. Only the statuses ``in_progress`` and ``incomplete`` mark it so."""
     output = response.get("output") if isinstance(response, dict) else None
     return isinstance(output, list) and any(
-        isinstance(item, dict) and (item.get("type") == "refusal"
-                                    or (item.get("type") == "message" and bool(item.get("content"))))
-        and item.get("status") not in ("in_progress", "incomplete")
-        for item in output)
+        _is_answer(item) and item.get("status") not in ("in_progress", "incomplete") for item in output)
+
+
+def _text_done(event) -> bool:
+    """Whether an event marks the text of an answer as done: a done event for output text or
+    for a refusal, or for a content part that is one of the two."""
+    kind, part = event.get("type"), event.get("part")
+    if kind in ("response.output_text.done", "response.refusal.done"):
+        return True
+    return (kind == "response.content_part.done" and isinstance(part, dict)
+            and part.get("type") in ("output_text", "refusal"))
 
 
 def holds_end(provider: str, raw: bytes) -> bool:
@@ -231,7 +251,7 @@ def holds_end(provider: str, raw: bytes) -> bool:
             return True
         if o.get("type") == "response.failed" and _carries_answer(o.get("response")):
             return True
-    done = any(o.get("type") == "response.output_item.done" and _carries_answer({"output": [o.get("item")]})
+    done = any((o.get("type") == "response.output_item.done" and _is_answer(o.get("item"))) or _text_done(o)
                for o in objs)
     if done and any(o.get("type") == "response.failed" for o in objs):
         return True

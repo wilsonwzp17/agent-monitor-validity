@@ -77,10 +77,25 @@ def delivered_then_failed(item):
 
 def partly_answered(status="in_progress"):
     """The events of a B stream that ends in ``response.failed`` while the provider marks its
-    message item, with the text that had arrived, as ``status``: part of an answer."""
+    message item as ``status``. The item holds the builder's text; the reader looks at the
+    status and not at the text, so to it this is part of an answer."""
     events = b_stream(status="failed", error=SERVER_ERROR)
     events[-1][1]["response"]["output"][1]["status"] = status
     return events
+
+
+def marked_done(kind, **fields):
+    """The events of ``partly_answered`` with one ``kind`` event before the failed event."""
+    events = partly_answered()
+    return events[:-1] + [(kind, dict({"type": kind, "item_id": "msg_1", "output_index": 1,
+                                       "content_index": 0}, **fields))] + events[-1:]
+
+
+TEXT_PART = {"type": "output_text", "text": TEXT, "annotations": []}
+DONE_EVENTS = (("response.output_text.done", {"text": TEXT}),
+               ("response.refusal.done", {"refusal": "I can't help."}),
+               ("response.content_part.done", {"part": TEXT_PART}),
+               ("response.content_part.done", {"part": {"type": "refusal", "refusal": "I can't help."}}))
 
 
 def ok(events, headers=None):
@@ -122,6 +137,10 @@ def ended_attempts():
          Exchange(200, A_HEADERS, sse(done_a)[:-1], "IncompleteRead: connection closed", None)),
         ("B its answer in an item-done event, then failed with an empty output", "B",
          ok(delivered_then_failed(message_item()))),
+        ("B failed with its answer item still in progress, after a done event for its text", "B",
+         ok(marked_done("response.output_text.done", text=TEXT))),
+        ("B failed after an item-done event whose item is marked incomplete", "B",
+         ok(delivered_then_failed(dict(message_item(), status="incomplete")))),
     ]
 
 
@@ -168,8 +187,10 @@ def unended_attempts():
         ("B failed, carrying part of an answer in an item marked incomplete", "B", ok(partly_answered("incomplete"))),
         ("B a 200 whose body is a failed response object with part of an answer", "B",
          Exchange(200, {}, json.dumps(partly_answered()[-1][1]["response"]).encode(), None, None)),
-        ("B failed after an item-done event whose item is marked incomplete", "B",
-         ok(delivered_then_failed(dict(message_item(), status="incomplete")))),
+        ("B failed with part of an answer after a done event for a part that is no answer", "B",
+         ok(marked_done("response.content_part.done", part={"type": "reasoning_text", "text": "x"}))),
+        ("B a done event for the answer text, then cut with no failed event", "B",
+         Exchange(200, {}, sse(marked_done("response.output_text.done", text=TEXT)[:-1]), reset, None)),
     ]
 
 
@@ -194,13 +215,20 @@ class TestHoldsEnd(unittest.TestCase):
 
     def test_a_failed_response_ends_only_when_it_carries_an_answer(self):
         refusal_item = [{"type": "refusal", "refusal": "I can't help."}]
-        empty_message = [{"id": "msg_1", "type": "message", "role": "assistant", "status": "in_progress",
+        empty_message = [{"id": "msg_1", "type": "message", "role": "assistant", "status": "completed",
                           "content": []}]
         no_status = {k: v for k, v in message_item().items() if k != "status"}
         cases = [(b_stream(status="failed", error=SERVER_ERROR), True),
-                 (bare_failed(output=refusal_item), True),
                  (bare_failed(output=[no_status]), True),                 # nothing says it is unfinished
                  (bare_failed(output=[dict(message_item(), status="odd")]), True),
+                 (bare_failed(output=refusal_item), True),
+                 (bare_failed(output=[dict(refusal_item[0], status="incomplete")]), False),
+                 (bare_failed(output=[dict(message_item(), status=None)]), True),
+                 (bare_failed(output=[dict(message_item(), status={})]), True),
+                 (bare_failed(output=[dict(message_item(), status="failed")]), True),
+                 (bare_failed(output=[dict(message_item(), status="IN_PROGRESS")]), True),   # not the provider's word
+                 (bare_failed(output=[dict(message_item(), status=["in_progress"])]), True),  # and it must not raise
+                 (bare_failed(output=[dict(message_item(), status=5)]), True),
                  (bare_failed(), False),
                  (bare_failed(output=[{"id": "rs_1", "type": "reasoning", "summary": []}]), False),
                  (bare_failed(output=empty_message), False),
@@ -224,17 +252,33 @@ class TestHoldsEnd(unittest.TestCase):
 
     def test_an_answer_in_an_item_done_event_counts_only_beside_a_failed_response(self):
         refusal_item = {"type": "refusal", "refusal": "I can't help."}
-        empty_message = {"id": "msg_1", "type": "message", "role": "assistant", "status": "in_progress", "content": []}
-        for item in (message_item(), refusal_item):
+        empty_message = {"id": "msg_1", "type": "message", "role": "assistant", "status": "completed", "content": []}
+        for item in (message_item(), refusal_item, dict(message_item(), status="incomplete"),
+                     dict(message_item(), status="in_progress"), dict(refusal_item, status="in_progress")):
+            # the event closes the item, whatever status the item carries
             events = delivered_then_failed(item)
             self.assertTrue(holds_end("openai", sse(events)), item["type"])
             self.assertTrue(holds_end("openai", sse(events[-1:] + events[:-1])), item["type"])   # in either order
             self.assertFalse(holds_end("openai", sse(events[:-1])), item["type"])                # no failed event
             self.assertFalse(holds_end("anthropic", sse(events)), item["type"])
-        for item in (REASONING_ITEM, empty_message, dict(message_item(), content=[]),
-                     dict(message_item(), status="in_progress"), dict(message_item(), status="incomplete"),
-                     dict(refusal_item, status="in_progress"), "message", None, ["message"], 5):
+        for item in (REASONING_ITEM, empty_message, dict(message_item(), status="in_progress", content=[]),
+                     "message", None, ["message"], 5):
             self.assertFalse(holds_end("openai", sse(delivered_then_failed(item))), item)
+
+    def test_a_done_event_for_the_answer_text_counts_beside_a_failed_response_whatever_the_item_says(self):
+        self.assertFalse(holds_end("openai", sse(partly_answered())))                  # no event says it is done
+        for kind, fields in DONE_EVENTS:
+            events = marked_done(kind, **fields)
+            self.assertTrue(holds_end("openai", sse(events)), (kind, fields))
+            self.assertTrue(holds_end("openai", sse(events[-1:] + events[:-1])), kind)   # in either order
+            self.assertFalse(holds_end("openai", sse(events[:-1])), kind)                # no failed event
+            self.assertFalse(holds_end("anthropic", sse(events)), kind)
+        for part in ({"type": "reasoning_text", "text": "x"}, {"type": "summary_text", "text": "x"},
+                     {"text": TEXT}, "output_text", None, ["output_text"], 5):
+            self.assertFalse(holds_end("openai", sse(marked_done("response.content_part.done", part=part))), part)
+        for kind in ("response.output_text.delta", "response.reasoning_summary_text.done",
+                     "response.output_item.added", "output_text.done"):
+            self.assertFalse(holds_end("openai", sse(marked_done(kind, text=TEXT))), kind)
 
     def test_one_whole_response_object_holds_its_end_by_its_stop_reason_or_status(self):
         self.assertTrue(holds_end("anthropic", a_object()))
@@ -450,6 +494,8 @@ class TestRecovery(DispatchCase):
                  ("A a whole message, then an error event", "A", sse(done_a + [A_ERROR_EVENT]), 200),
                  ("A a whole stream that lacks only its last line break", "A", sse(done_a)[:-1], 200),
                  ("B a whole stream that lacks only its last line break", "B", sse(b_stream())[:-1], 200),
+                 ("B a done event for its answer text, then failed", "B",
+                  sse(marked_done("response.output_text.done", text=TEXT)), 200),
                  ("B its answer in an item-done event, then failed", "B", sse(delivered_then_failed(message_item())),
                   200)]
         for n, (name, judge, raw, status) in enumerate(cases):
@@ -604,6 +650,8 @@ class TestTheStageRunner(TRS.RunnerCase):
                          [(1, TRANSPORT, None), (2, VALID, None)])
         self.assertIsNone(records[0]["parse"])
         self.assertEqual(report["gates"]["halts"], [])
+        # It reported its usage in full, so the ledger settles it: a retried failed response can be paid for.
+        self.assertEqual(self.reservations("B1"), [(1, "settled"), (2, "settled")])
         kept = (self.log.slot_dir(self.key, self.config, "B", 1) / "1.raw").read_bytes()
         self.assertEqual(kept, sse(partly_answered()))
 
